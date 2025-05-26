@@ -4,7 +4,7 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-import openai
+from openai import OpenAI
 
 # .env から環境変数を読み込む
 load_dotenv()
@@ -29,23 +29,23 @@ if not all([LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, OPENAI_API_KEY]):
 # LINE Bot API と WebhookHandler を初期化
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-openai.api_key = OPENAI_API_KEY
+
+# OpenAI v1 クライアントを初期化
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Webhook 受信用エンドポイント
 @app.route("/callback", methods=["POST"])
 def callback():
-    # 署名とボディをログ出力してデバッグ
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
     print(f"[DEBUG] Signature: {signature}")
     print(f"[DEBUG] Body: {body}")
 
-    # 簡易テスト用に署名検証をスキップするオプション
+    # 簡易テスト用に署名検証をスキップ
     if os.getenv("DISABLE_SIGNATURE_CHECK", "false").lower() == "true":
         handler.handle(body, signature)
         return "OK"
 
-    # 通常は署名検証を行う
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
@@ -63,7 +63,8 @@ def handle_message(event):
         "かわいく説明してね💕"
     )
     try:
-        response = openai.ChatCompletion.create(
+        # OpenAI v1 の new interface を使用
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": "あなたは料理の達人で、かわいくレシピを紹介するガイドです。"},
@@ -72,17 +73,17 @@ def handle_message(event):
             max_tokens=500,
             temperature=0.8,
         )
+        # レスポンスからメッセージ抽出
         recipe_text = response.choices[0].message.content.strip()
     except Exception as e:
         print(f"[ERROR] OpenAI API error: {e}")
         recipe_text = "ごめんなさい、レシピの生成中にエラーが発生しちゃった…"
 
+    # LINE に返信
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text=recipe_text)
     )
 
 if __name__ == "__main__":
-    # ポートは環境変数 PORT or 8000
-    # サーバー更新後は必ず再起動してください
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
