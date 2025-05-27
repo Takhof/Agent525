@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, FlexSendMessage
 from openai import OpenAI
 
 # .env から環境変数を読み込む
@@ -33,39 +33,36 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # OpenAI v1 クライアントを初期化
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# テキストをチャンクに分割するヘルパー
-def chunk_text(text, max_len=1000):
-    lines = text.split("\n")
-    chunks = []
-    current = ""
-    for line in lines:
-        if current and len(current) + len(line) + 1 > max_len:
-            chunks.append(current)
-            current = line
+# テキストをバブル用にチャンクに分割するヘルパー
+def make_bubble_chunks(text, max_chars=2000):
+    # テキストを文章単位で分割
+    sentences = text.replace("\n", " ").split('。')
+    bubbles = []
+    current = ''
+    for sentence in sentences:
+        if not sentence.strip():
+            continue
+        piece = sentence + '。'
+        if current and len(current) + len(piece) > max_chars:
+            bubbles.append(current)
+            current = piece
         else:
-            current = f"{current}\n{line}" if current else line
+            current += piece
     if current:
-        chunks.append(current)
-    return chunks
-
+        bubbles.append(current)
+    return bubbles
 
 # Webhook 受信用エンドポイント
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
-    print(f"[DEBUG] Signature: {signature}")
-    print(f"[DEBUG] Body: {body}")
-
-    # 簡易テスト用に署名検証をスキップ
     if os.getenv("DISABLE_SIGNATURE_CHECK", "false").lower() == "true":
         handler.handle(body, signature)
         return "OK"
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        print("[ERROR] Invalid signature. Request aborted.")
         abort(400)
     return "OK"
 
@@ -74,39 +71,45 @@ def callback():
 def handle_message(event):
     user_text = event.message.text.strip()
     prompt = (
-        f"以下の材料で作れるレシピを3つ考えてください:\n"
-        f"材料: {user_text}\n"
-        "かわいく説明してね💕"
+        f"以下の材料で作れるレシピを考えてください。短くまとめてください。でもかわいく、Emoticon適度に使って:\n"
+        f"材料: {user_text}"
     )
     try:
-        # OpenAI v1 の new interface を使用
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "あなたは料理の達人で、かわいくレシピを紹介するガイドです。"},
+                {"role": "system", "content": "あなたは短くてかわいいレシピを紹介するガイドです。"},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=300,
             temperature=0.8,
         )
         recipe_text = response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"[ERROR] OpenAI API error: {e}")
+    except Exception:
         recipe_text = "ごめんなさい、レシピの生成中にエラーが発生しちゃった…"
 
-    # テキストをチャンクに分割して送信
-    chunks = chunk_text(recipe_text, max_len=1000)
-    messages = [TextSendMessage(text=chunk) for chunk in chunks[:5]]
+    # バブル用テキストを作成
+    bubble_texts = make_bubble_chunks(recipe_text, max_chars=2000)
+    bubbles = []
+    for text in bubble_texts[:10]:  # 最大10バブル
+        bubbles.append({
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {"type": "text", "text": text, "wrap": True}
+                ]
+            }
+        })
+    flex = FlexSendMessage(
+        alt_text="レシピ",
+        contents={"type": "carousel", "contents": bubbles}
+    )
     try:
-        line_bot_api.reply_message(event.reply_token, messages)
-    except LineBotApiError:
-        # リプライトークン無効時はプッシュで送信
-        user_id = event.source.user_id
-        for msg in messages:
-            try:
-                line_bot_api.push_message(user_id, msg)
-            except LineBotApiError:
-                break
-    
+        line_bot_api.reply_message(event.reply_token, flex)
+    except LineBotApiError as e:
+        print(f"[WARNING] Reply failed: {e}")
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
