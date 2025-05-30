@@ -63,27 +63,8 @@ def make_bubble_chunks(text, max_chars=2000):
     return bubbles
 
 def build_recipe_messages(recipe_text, max_chars=5000, max_groups=5, group_size=3):
-    bubble_texts = make_bubble_chunks(recipe_text, max_chars=max_chars)
-    grouped = [bubble_texts[i:i+group_size] for i in range(0, len(bubble_texts), group_size)]
+    return [TextSendMessage(text=recipe_text)]
 
-    messages = []
-    for group in grouped[:max_groups]:
-        bubbles = []
-        for text in group:
-            bubbles.append({
-                "type": "bubble",
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [{"type": "text", "text": text, "wrap": True}]
-                }
-            })
-        flex = FlexSendMessage(
-            alt_text="れしぴできたよ〜っ🍳💕",
-            contents={"type": "carousel", "contents": bubbles}
-        )
-        messages.append(flex)
-    return messages
 
 
 # Webhook 受信用エンドポイント
@@ -111,7 +92,7 @@ def detect_ingredients_from_image(image_path):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "この画像の中にある食材をリストアップしてください。"},
+                    {"type": "text", "text": "この画像の中にある食材をリストアップしてください。一回リストアップしたら終了してください。"},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"}}
                 ]
             }
@@ -132,7 +113,7 @@ def generate_recipe_from_ingredients(ingredients):
                 {"role": "system", "content": "あなたは短くてかわいいレシピを紹介するガイドです。"},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=300,
+            max_tokens=2000,
             temperature=0.8,
         )
         return response.choices[0].message.content.strip()
@@ -145,11 +126,20 @@ def generate_recipe_from_ingredients(ingredients):
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_text = event.message.text.strip()
-    prompt = (
-        f"以下の材料で作れるレシピを１っこだけ考えてください。短くまとめてください。でもかわいく、Emoticon適度に使って:\n"
-        f"材料: {user_text}"
-    )
+
     try:
+        # ✅ まずはすぐに返信！（reply_tokenは1回しか使えないの！）
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="材料みたよ〜っ🍅✨ いまかわいいレシピつくってるね💕")
+        )
+
+        # 🧠 ここでレシピを生成（ちょっと時間かかってもOK）
+        prompt = (
+            f"以下の材料で作れるレシピを１っこだけ考えてください。"
+            f"短くまとめてください。でもかわいく、Emoticon適度に使って:\n"
+            f"材料: {user_text}"
+        )
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
@@ -161,35 +151,54 @@ def handle_message(event):
         )
         recipe_text = response.choices[0].message.content.strip()
         messages = build_recipe_messages(recipe_text)
-        line_bot_api.reply_message(event.reply_token, messages)
-    except Exception:
-        recipe_text = "ごめんなさい、レシピの生成中にエラーが発生しちゃった…"
 
-    except LineBotApiError as e:
-        print(f"[WARNING] Reply failed: {e}")
+        # 📩 push_message でユーザーにあとから結果を送信！
+        user_id = event.source.user_id
+        for msg in messages:
+            line_bot_api.push_message(user_id, msg)
 
+    except Exception as e:
+        print(f"[ERROR] text message error: {e}")
+        traceback.print_exc()
+        line_bot_api.push_message(
+            event.source.user_id,
+            TextSendMessage(text="えへへ、レシピの生成でちょっとおっちょこしちゃったの…💦")
+        )
 
 #Imageから料理を作るハンドラ
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image(event):
+    # ① すぐレスポンス返して LINE を安心させる（リトライ防止）
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-            message_content = line_bot_api.get_message_content(event.message.id)
-            for chunk in message_content.iter_content():
-                tmp_file.write(chunk)
-            tmp_path = tmp_file.name
-        ingredients_text = detect_ingredients_from_image(tmp_path)
-        recipe = generate_recipe_from_ingredients(ingredients_text)
-        messages = build_recipe_messages(recipe)
-        line_bot_api.reply_message(event.reply_token, messages))
-
-    except Exception as e:
-        print(f"[ERROR] image error: {e}")
-        traceback.print_exc()
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="えへへ、写真からのレシピでちょっとつまずいちゃったの…📷💦")
+            TextSendMessage(text="れしぴ考え中だよ〜っ📷✨ちょっとまっててね！")
         )
+    except LineBotApiError as e:
+        print(f"[WARNING] reply_message failed early: {e}")
+
+    # ② あとは別スレッドで処理
+    import threading
+
+    def async_job():
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+                message_content = line_bot_api.get_message_content(event.message.id)
+                for chunk in message_content.iter_content():
+                    tmp_file.write(chunk)
+                tmp_path = tmp_file.name
+
+            ingredients = detect_ingredients_from_image(tmp_path)
+            recipe = generate_recipe_from_ingredients(ingredients)
+            messages = build_recipe_messages(recipe)
+
+            # ここで push_message に変更！✨
+            line_bot_api.push_message(event.source.user_id, messages)
+
+        except Exception as e:
+            print("[ERROR] async_job failed:", e)
+
+    threading.Thread(target=async_job).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
