@@ -192,8 +192,8 @@ def handle_image(event):
             recipe = generate_recipe_from_ingredients(ingredients)
             messages = build_recipe_messages(recipe)
 
-            # ここで push_message に変更！✨
-            line_bot_api.push_message(event.source.user_id, messages)
+            for msg in messages:
+                line_bot_api.push_message(event.source.user_id, msg)
 
         except Exception as e:
             print("[ERROR] async_job failed:", e)
