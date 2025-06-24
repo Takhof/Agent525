@@ -128,13 +128,11 @@ def handle_message(event):
     user_text = event.message.text.strip()
 
     try:
-        # ✅ まずはすぐに返信！（reply_tokenは1回しか使えないの！）
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text="材料みたよ〜っ🍅✨ いまかわいいレシピつくってるね💕")
         )
 
-        # 🧠 ここでレシピを生成（ちょっと時間かかってもOK）
         prompt = (
             f"以下の材料で作れるレシピを１っこだけ考えてください。"
             f"短くまとめてください。でもかわいく、Emoticon適度に使って:\n"
@@ -152,7 +150,6 @@ def handle_message(event):
         recipe_text = response.choices[0].message.content.strip()
         messages = build_recipe_messages(recipe_text)
 
-        # 📩 push_message でユーザーにあとから結果を送信！
         user_id = event.source.user_id
         for msg in messages:
             line_bot_api.push_message(user_id, msg)
